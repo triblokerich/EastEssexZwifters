@@ -122,16 +122,23 @@ h+=`<div class="card"><h3>Team results (click a team, or a rider chip)</h3><div 
 const cols=[{h:'Date',v:x=>x.ds},{h:'Route',v:x=>x.rt},{h:'Teams',v:x=>x.n},{h:'Riders',v:x=>x.rd},{h:'Avg km/h',v:x=>x.sp,f:v=>f1(v)},{h:'Best overall top %',v:x=>-x.best,f:v=>P(-v)}];
 return h+`<div class="card" style="margin-top:14px"><h3>All event days</h3>${table('days',cols,g,x=>go('events','date',x.ds))}</div>`}};
 const TABS=[['events','Latest week'],['ov','Overview'],['teams','Teams'],['riders','Riders'],['courses','Courses']];
-function draw(){CH.forEach(c=>c.destroy());CH=[];Q=[];filt();
+const HK={events:'latest-week',ov:'overview',teams:'teams',riders:'riders',courses:'courses'},slug=s=>String(s).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'');
+const curHash=()=>S.tab=='courses'&&S.route?'courses-'+slug(S.route):HK[S.tab];
+function parse(){const h=location.hash.slice(1).toLowerCase();if(h.startsWith('courses-')){const r=D.r.find(x=>slug(x)==h.slice(8));if(r){S.tab='courses';S.route=r;return}}
+const t=Object.keys(HK).find(k=>HK[k]==h);if(t){S.tab=t;if(t=='events')latest();if(t=='courses')S.route=null}}
+addEventListener('hashchange',()=>{if(location.hash.slice(1)!=curHash()){parse();draw()}});
+const PW='fca7477718f6ba1d36f9b64aaa2ec9f2d48f3ca2e5fda252bc2f3e16781f0a1e';
+async function unlock(){const p=prompt('Enter the password to load a newer workbook');if(p==null)return;const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(p)),h=[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('');if(h==PW){S.unl=true;draw()}else alert('Incorrect password')}
+function draw(){CH.forEach(c=>c.destroy());CH=[];Q=[];filt();{const h=curHash();if(location.hash.slice(1)!=h)location.hash=h}
 try{Chart.defaults.color=getComputedStyle(document.documentElement).getPropertyValue('--mut');Chart.defaults.borderColor=getComputedStyle(document.documentElement).getPropertyValue('--line')}catch(e){}
 $('#nav').innerHTML=TABS.map(([k,l])=>`<button class="${S.tab==k?'on':''}" onclick="go('${k}')">${l}</button>`).join('');
 const yrs=uniq(R.map(r=>r.ds.slice(0,4))).sort(),cats=uniq(R.map(r=>r.cat));
-$('#flt').innerHTML=`<select aria-label="Year" onchange="S.year=this.value;draw()"><option value="all">All years</option>${yrs.map(y=>`<option ${S.year==y?'selected':''}>${y}</option>`).join('')}</select><select aria-label="Category" onchange="S.cat=this.value;draw()"><option value="all">All coffee categories</option>${cats.map(c=>`<option ${S.cat==c?'selected':''}>${c}</option>`).join('')}</select><label class="btn">Load newer workbook<input type="file" accept=".xlsx,.xlsm" hidden onchange="load(this.files[0])"></label>`;
+$('#flt').innerHTML=`<select aria-label="Year" onchange="S.year=this.value;draw()"><option value="all">All years</option>${yrs.map(y=>`<option ${S.year==y?'selected':''}>${y}</option>`).join('')}</select><select aria-label="Category" onchange="S.cat=this.value;draw()"><option value="all">All coffee categories</option>${cats.map(c=>`<option ${S.cat==c?'selected':''}>${c}</option>`).join('')}</select>${S.unl?'<label class="btn">Choose workbook…<input type="file" accept=".xlsx,.xlsm" hidden onchange="load(this.files[0])"></label>':'<button class="btn" onclick="unlock()">🔒 Load newer workbook</button>'}`;
 $('#sub').textContent=`${R.length.toLocaleString()} rider starts · ${R[0].ds} to ${R[R.length-1].ds}`;
 $('#main').innerHTML=E.length?VIEW[S.tab]():'<p class="hint">No results for these filters.</p>';Q.forEach(f=>f())}
-function load(f){if(!f)return;const rd=new FileReader;rd.onload=e=>{try{const ws=XLSX.read(e.target.result,{type:'array'}).Sheets['TTT Archive'],a=XLSX.utils.sheet_to_json(ws,{header:1}).slice(1).filter(r=>typeof r[0]=='number');
+function load(f){if(!f||!S.unl)return;const rd=new FileReader;rd.onload=e=>{try{const ws=XLSX.read(e.target.result,{type:'array'}).Sheets['TTT Archive'],a=XLSX.utils.sheet_to_json(ws,{header:1}).slice(1).filter(r=>typeof r[0]=='number');
 const r=[],n=[],t=[],c=[],ix=(L,v)=>{let i=L.indexOf(v);if(i<0)i=L.push(v)-1;return i},rows=a.map(x=>{const w=parseFloat(x[4]);return[Math.round(x[0]-25569),ix(r,x[1]),x[2],ix(n,x[3]),isNaN(w)?null:w,ix(t,String(x[5]).replace(/[()]/g,'')),ix(c,x[6]),Math.round(x[7]*1440),x[8],x[9],x[10],x[11],Math.round(x[12]*86400),x[28]||0,x[29]]});
 prep({r,n,t,c,rows});S.rider=S.team=S.route=null;S.tab='events';S.year='all';S.cat='all';latest();draw()}catch(err){alert('Could not read a "TTT Archive" sheet from that file.')}};rd.readAsArrayBuffer(f)}
 let LAST;function latest(){LAST=R.reduce((m,r)=>r.ds>m?r.ds:m,'');S.date=LAST}
-prep(DATA);latest();draw();
+prep(DATA);latest();parse();draw();
 </script></body></html>
