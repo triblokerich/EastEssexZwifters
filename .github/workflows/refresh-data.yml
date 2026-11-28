@@ -25,19 +25,68 @@ jobs:
           ONEDRIVE_URL: ${{ secrets.ONEDRIVE_URL }}
         run: |
           python - <<'PY'
-          import os, sys, base64, zipfile, urllib.request
+          import os, sys, base64, urllib.request, urllib.error, urllib.parse
+          UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
           url = os.environ["ONEDRIVE_URL"].strip()
           if not url:
               sys.exit("The ONEDRIVE_URL secret is empty.")
-          enc = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
-          api = "https://api.onedrive.com/v1.0/shares/u!" + enc + "/root/content"
-          req = urllib.request.Request(api, headers={"User-Agent": "Mozilla/5.0"})
-          with urllib.request.urlopen(req, timeout=120) as r:
-              data = r.read()
-          open("/tmp/src.xlsm", "wb").write(data)
-          if len(data) < 100_000 or not zipfile.is_zipfile("/tmp/src.xlsm"):
-              sys.exit("Download did not return a valid Excel file. Check the OneDrive link is shared as 'Anyone with the link can view'.")
-          print("Downloaded", len(data), "bytes")
+
+          def share_id(u):
+              return "u!" + base64.urlsafe_b64encode(u.encode()).decode().rstrip("=")
+
+          def fetch(u):
+              req = urllib.request.Request(u, headers=UA)
+              with urllib.request.urlopen(req, timeout=120) as r:
+                  return r.geturl(), r.headers.get("Content-Type", ""), r.read()
+
+          def safe(u):
+              # logs on a public repo are public, so never print link tokens
+              p = urllib.parse.urlparse(u)
+              q = ",".join(urllib.parse.parse_qs(p.query).keys())
+              return p.netloc + p.path[:10] + ("..." if len(p.path) > 10 else "") + (" ?" + q if q else "")
+
+          def is_xlsx(data):
+              return len(data) > 100_000 and data[:2] == b"PK"
+
+          bare = url.split("?")[0]
+          sep = "&" if "?" in url else "?"
+          tries = [
+              ("1 shares API, link as given", lambda: "https://api.onedrive.com/v1.0/shares/" + share_id(url) + "/root/content"),
+              ("2 shares API, link without ?e=", lambda: "https://api.onedrive.com/v1.0/shares/" + share_id(bare) + "/root/content"),
+              ("3 link + download=1", lambda: url + sep + "download=1"),
+              ("4 link without ?e= + download=1", lambda: bare + "?download=1"),
+          ]
+          final = None
+          try:
+              final = fetch(url)[0]
+              print("Link resolves to:", safe(final))
+          except Exception as e:
+              print("Could not open the link at all:", type(e).__name__, getattr(e, "code", ""))
+          if final and final != url:
+              fb = final.split("#")[0]
+              fsep = "&" if "?" in fb else "?"
+              tries += [
+                  ("5 shares API, resolved link", lambda: "https://api.onedrive.com/v1.0/shares/" + share_id(final) + "/root/content"),
+                  ("6 resolved link + download=1", lambda: fb + fsep + "download=1"),
+                  ("7 resolved link, redir to download", lambda: fb.replace("/redir?", "/download?").replace("/redir/", "/download/")),
+              ]
+
+          for name, build in tries:
+              try:
+                  target = build()
+                  _, ctype, data = fetch(target)
+                  if is_xlsx(data):
+                      open("/tmp/src.xlsm", "wb").write(data)
+                      print("OK via method", name, "-", len(data), "bytes")
+                      sys.exit(0)
+                  print("Method", name, "- got", len(data), "bytes of", ctype or "unknown type", "(not an Excel file)")
+              except SystemExit:
+                  raise
+              except urllib.error.HTTPError as e:
+                  print("Method", name, "- HTTP", e.code)
+              except Exception as e:
+                  print("Method", name, "-", type(e).__name__)
+          sys.exit("None of the download methods worked. Open the OneDrive link in a private/incognito window: if it asks you to sign in, change the sharing setting to 'Anyone with the link can view'.")
           PY
 
       - name: Keep only the TTT Archive tab
