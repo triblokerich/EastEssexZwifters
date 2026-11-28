@@ -25,11 +25,19 @@ jobs:
           ONEDRIVE_URL: ${{ secrets.ONEDRIVE_URL }}
         run: |
           python - <<'PY'
-          import os, sys, base64, urllib.request, urllib.error, urllib.parse
+          import os, sys, re, html, base64, urllib.request, urllib.error, urllib.parse
           UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
           url = os.environ["ONEDRIVE_URL"].strip()
           if not url:
               sys.exit("The ONEDRIVE_URL secret is empty.")
+          m = re.search(r'src="([^"]+)"', url)
+          if "<iframe" in url and m:          # whole embed code pasted: use just the address
+              url = html.unescape(m.group(1))
+
+          def to_download(u):
+              q = urllib.parse.parse_qs(urllib.parse.urlparse(u).query)
+              keep = {k: v[0] for k, v in q.items() if k in ("resid", "authkey", "cid", "id")}
+              return "https://onedrive.live.com/download?" + urllib.parse.urlencode(keep)
 
           def share_id(u):
               return "u!" + base64.urlsafe_b64encode(u.encode()).decode().rstrip("=")
@@ -50,7 +58,10 @@ jobs:
 
           bare = url.split("?")[0]
           sep = "&" if "?" in url else "?"
-          tries = [
+          tries = []
+          if "onedrive.live.com/embed" in url:
+              tries.append(("0 embed link as direct download", lambda: to_download(url)))
+          tries += [
               ("1 shares API, link as given", lambda: "https://api.onedrive.com/v1.0/shares/" + share_id(url) + "/root/content"),
               ("2 shares API, link without ?e=", lambda: "https://api.onedrive.com/v1.0/shares/" + share_id(bare) + "/root/content"),
               ("3 link + download=1", lambda: url + sep + "download=1"),
@@ -58,11 +69,11 @@ jobs:
           ]
           final = None
           try:
-              final = fetch(url)[0]
+              final = fetch(url)[0] if "/embed" not in url else None
               print("Link resolves to:", safe(final))
           except Exception as e:
               print("Could not open the link at all:", type(e).__name__, getattr(e, "code", ""))
-          if final and final != url:
+          if final and final != url and "login.live.com" not in final:
               fb = final.split("#")[0]
               fsep = "&" if "?" in fb else "?"
               tries += [
