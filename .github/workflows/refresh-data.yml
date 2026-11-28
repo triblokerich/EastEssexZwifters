@@ -1,0 +1,81 @@
+name: Refresh Zwift TTT data
+
+# Run this by hand: Actions tab > "Refresh Zwift TTT data" > Run workflow
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install openpyxl
+
+      - name: Download the workbook from OneDrive
+        env:
+          ONEDRIVE_URL: ${{ secrets.ONEDRIVE_URL }}
+        run: |
+          python - <<'PY'
+          import os, sys, base64, zipfile, urllib.request
+          url = os.environ["ONEDRIVE_URL"].strip()
+          if not url:
+              sys.exit("The ONEDRIVE_URL secret is empty.")
+          enc = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+          api = "https://api.onedrive.com/v1.0/shares/u!" + enc + "/root/content"
+          req = urllib.request.Request(api, headers={"User-Agent": "Mozilla/5.0"})
+          with urllib.request.urlopen(req, timeout=120) as r:
+              data = r.read()
+          open("/tmp/src.xlsm", "wb").write(data)
+          if len(data) < 100_000 or not zipfile.is_zipfile("/tmp/src.xlsm"):
+              sys.exit("Download did not return a valid Excel file. Check the OneDrive link is shared as 'Anyone with the link can view'.")
+          print("Downloaded", len(data), "bytes")
+          PY
+
+      - name: Keep only the TTT Archive tab
+        run: |
+          python - <<'PY'
+          import sys
+          from openpyxl import load_workbook, Workbook
+          KEEP = list(range(0, 13)) + [28, 29]          # A:M and AC:AD
+          src = load_workbook("/tmp/src.xlsm", data_only=True, read_only=True)
+          if "TTT Archive" not in src.sheetnames:
+              sys.exit("No sheet called 'TTT Archive' in the workbook.")
+          out = Workbook()
+          ws = out.active
+          ws.title = "TTT Archive"
+          n = 0
+          for row in src["TTT Archive"].iter_rows(values_only=True):
+              row = list(row) + [None] * (30 - len(row))
+              new = [row[i] if i in KEEP else None for i in range(30)]
+              if any(v is not None for v in new):
+                  ws.append(new)
+                  n += 1
+          if n < 1000:
+              sys.exit(f"Only {n} rows found - refusing to publish.")
+          out.save("Zwift_TTT.xlsx")
+          print("Wrote", n, "rows")
+          PY
+
+      - name: Commit and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Zwift_TTT.xlsx
+          if git diff --cached --quiet; then
+            echo "No changes - the data is already up to date."
+          else
+            git commit -m "Refresh Zwift TTT data from OneDrive"
+            git push
+            gh api -X POST "repos/${{ github.repository }}/pages/builds" || true
+          fi
