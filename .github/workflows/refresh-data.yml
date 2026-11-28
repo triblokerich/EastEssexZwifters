@@ -1,6 +1,7 @@
 name: Refresh Zwift TTT data
 
-# Run this by hand: Actions tab > "Refresh Zwift TTT data" > Run workflow
+# Run manually: Actions tab > "Refresh Zwift TTT data" > Run workflow
+
 on:
   workflow_dispatch:
 
@@ -11,6 +12,7 @@ permissions:
 jobs:
   refresh:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -18,86 +20,68 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: pip install openpyxl
+      - name: Install Python packages
+        run: pip install openpyxl
 
-      - name: Download the workbook from OneDrive
+      - name: Download the workbook from Dropbox
         env:
-          ONEDRIVE_URL: ${{ secrets.ONEDRIVE_URL }}
+          DROPBOX_URL: ${{ secrets.DROPBOX_URL }}
         run: |
           python - <<'PY'
-          import os, sys, re, html, base64, urllib.request, urllib.error, urllib.parse
-          UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
-          url = os.environ["ONEDRIVE_URL"].strip()
+          import os
+          import sys
+          import urllib.request
+          import urllib.parse
+          import zipfile
+
+          url = os.environ.get("DROPBOX_URL", "").strip()
+
           if not url:
-              sys.exit("The ONEDRIVE_URL secret is empty.")
-          m = re.search(r'src="([^"]+)"', url)
-          if "<iframe" in url and m:          # whole embed code pasted: use just the address
-              url = html.unescape(m.group(1))
+              sys.exit("The DROPBOX_URL GitHub secret is empty.")
 
-          def to_download(u):
-              q = urllib.parse.parse_qs(urllib.parse.urlparse(u).query)
-              keep = {k: v[0] for k, v in q.items() if k in ("resid", "authkey", "cid", "id")}
-              return "https://onedrive.live.com/download?" + urllib.parse.urlencode(keep)
+          # Convert a standard Dropbox sharing link into a direct-download link.
+          # This works with links ending in ?dl=0 or ?dl=1.
+          parts = urllib.parse.urlsplit(url)
+          if parts.scheme not in ("http", "https") or "dropbox.com" not in parts.netloc.lower():
+              sys.exit("DROPBOX_URL must be a valid Dropbox shared-file URL.")
 
-          def share_id(u):
-              return "u!" + base64.urlsafe_b64encode(u.encode()).decode().rstrip("=")
+          query = urllib.parse.parse_qs(parts.query, keep_blank_values=True)
+          query["dl"] = ["1"]
+          download_url = urllib.parse.urlunsplit((
+              parts.scheme,
+              parts.netloc,
+              parts.path,
+              urllib.parse.urlencode(query, doseq=True),
+              parts.fragment
+          ))
 
-          def fetch(u):
-              req = urllib.request.Request(u, headers=UA)
-              with urllib.request.urlopen(req, timeout=120) as r:
-                  return r.geturl(), r.headers.get("Content-Type", ""), r.read()
+          request = urllib.request.Request(
+              download_url,
+              headers={"User-Agent": "Mozilla/5.0"}
+          )
 
-          def safe(u):
-              # logs on a public repo are public, so never print link tokens
-              p = urllib.parse.urlparse(u)
-              q = ",".join(urllib.parse.parse_qs(p.query).keys())
-              return p.netloc + p.path[:10] + ("..." if len(p.path) > 10 else "") + (" ?" + q if q else "")
-
-          def is_xlsx(data):
-              return len(data) > 100_000 and data[:2] == b"PK"
-
-          bare = url.split("?")[0]
-          sep = "&" if "?" in url else "?"
-          tries = []
-          if "onedrive.live.com/embed" in url:
-              tries.append(("0 embed link as direct download", lambda: to_download(url)))
-          tries += [
-              ("1 shares API, link as given", lambda: "https://api.onedrive.com/v1.0/shares/" + share_id(url) + "/root/content"),
-              ("2 shares API, link without ?e=", lambda: "https://api.onedrive.com/v1.0/shares/" + share_id(bare) + "/root/content"),
-              ("3 link + download=1", lambda: url + sep + "download=1"),
-              ("4 link without ?e= + download=1", lambda: bare + "?download=1"),
-          ]
-          final = None
           try:
-              final = fetch(url)[0] if "/embed" not in url else None
-              print("Link resolves to:", safe(final))
-          except Exception as e:
-              print("Could not open the link at all:", type(e).__name__, getattr(e, "code", ""))
-          if final and final != url and "login.live.com" not in final:
-              fb = final.split("#")[0]
-              fsep = "&" if "?" in fb else "?"
-              tries += [
-                  ("5 shares API, resolved link", lambda: "https://api.onedrive.com/v1.0/shares/" + share_id(final) + "/root/content"),
-                  ("6 resolved link + download=1", lambda: fb + fsep + "download=1"),
-                  ("7 resolved link, redir to download", lambda: fb.replace("/redir?", "/download?").replace("/redir/", "/download/")),
-              ]
+              with urllib.request.urlopen(request, timeout=120) as response:
+                  data = response.read()
+                  content_type = response.headers.get("Content-Type", "")
+          except Exception as exc:
+              sys.exit(f"Could not download the Dropbox workbook: {type(exc).__name__}: {exc}")
 
-          for name, build in tries:
-              try:
-                  target = build()
-                  _, ctype, data = fetch(target)
-                  if is_xlsx(data):
-                      open("/tmp/src.xlsm", "wb").write(data)
-                      print("OK via method", name, "-", len(data), "bytes")
-                      sys.exit(0)
-                  print("Method", name, "- got", len(data), "bytes of", ctype or "unknown type", "(not an Excel file)")
-              except SystemExit:
-                  raise
-              except urllib.error.HTTPError as e:
-                  print("Method", name, "- HTTP", e.code)
-              except Exception as e:
-                  print("Method", name, "-", type(e).__name__)
-          sys.exit("None of the download methods worked. Open the OneDrive link in a private/incognito window: if it asks you to sign in, change the sharing setting to 'Anyone with the link can view'.")
+          # Excel .xlsm files are ZIP containers and start with the ZIP signature.
+          output_path = "/tmp/src.xlsm"
+          with open(output_path, "wb") as file:
+              file.write(data)
+
+          if len(data) < 100_000 or not zipfile.is_zipfile(output_path):
+              os.remove(output_path)
+              sys.exit(
+                  "Dropbox did not return a valid Excel workbook. "
+                  f"Received {len(data)} bytes (content type: {content_type or 'unknown'}). "
+                  "Check that the Dropbox link is for the file and that "
+                  "'Anyone with the link' can view it."
+              )
+
+          print(f"Downloaded valid Excel workbook ({len(data):,} bytes).")
           PY
 
       - name: Keep only the TTT Archive tab
@@ -105,22 +89,31 @@ jobs:
           python - <<'PY'
           import sys
           from openpyxl import load_workbook, Workbook
-          KEEP = list(range(0, 13)) + [28, 29]          # A:M and AC:AD
+
+          KEEP = list(range(0, 13)) + [28, 29]  # A:M and AC:AD
+
           src = load_workbook("/tmp/src.xlsm", data_only=True, read_only=True)
+
           if "TTT Archive" not in src.sheetnames:
               sys.exit("No sheet called 'TTT Archive' in the workbook.")
+
           out = Workbook()
           ws = out.active
           ws.title = "TTT Archive"
+
           n = 0
+
           for row in src["TTT Archive"].iter_rows(values_only=True):
               row = list(row) + [None] * (30 - len(row))
               new = [row[i] if i in KEEP else None for i in range(30)]
+
               if any(v is not None for v in new):
                   ws.append(new)
                   n += 1
+
           if n < 1000:
               sys.exit(f"Only {n} rows found - refusing to publish.")
+
           out.save("Zwift_TTT.xlsx")
           print("Wrote", n, "rows")
           PY
@@ -131,11 +124,13 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add Zwift_TTT.xlsx
+
           if git diff --cached --quiet; then
             echo "No changes - the data is already up to date."
           else
-            git commit -m "Refresh Zwift TTT data from OneDrive"
+            git commit -m "Refresh Zwift TTT data from Dropbox"
             git push
             gh api -X POST "repos/${{ github.repository }}/pages/builds" || true
           fi
